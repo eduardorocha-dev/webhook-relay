@@ -1,5 +1,15 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.db.session import engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await engine.dispose()
 
 
 def create_app() -> FastAPI:
@@ -7,6 +17,7 @@ def create_app() -> FastAPI:
         title="webhook-relay",
         description="Receives, verifies, deduplicates, and reliably delivers webhook events.",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     app.add_middleware(
