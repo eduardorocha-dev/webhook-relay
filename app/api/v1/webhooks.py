@@ -8,6 +8,7 @@ from app.api.deps import get_db
 from app.core.idempotency import is_duplicate
 from app.core.security import verify_webhook_signature
 from app.models.event import WebhookEvent
+from app.config import settings
 from app.providers.registry import get_provider
 from app.schemas.webhook import WebhookEventResponse
 
@@ -49,5 +50,13 @@ async def ingest_webhook(
     db.add(event)
     await db.commit()
     await db.refresh(event)
+
+    # 6. Enqueue dispatch task
+    from app.workers.tasks import dispatch_event
+    dispatch_event.delay(
+        event_id=str(event.id),
+        target_url=settings.target_url,
+        payload=payload,
+    )
 
     return event

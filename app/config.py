@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""
     stripe_webhook_secret: str = ""
 
+    target_url: str = "http://localhost:9000/receive"
+
     max_retry_attempts: int = 5
     retry_base_delay_seconds: int = 10
 
