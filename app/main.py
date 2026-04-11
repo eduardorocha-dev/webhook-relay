@@ -11,8 +11,6 @@ async def lifespan(app: FastAPI):
     yield
     await engine.dispose()
 
-# Check webhook 
-
 def create_app() -> FastAPI:
     app = FastAPI(
         title="webhook-relay",
@@ -30,8 +28,10 @@ def create_app() -> FastAPI:
 
     from app.api.v1.health import router as health_router
     from app.api.v1.webhooks import router as webhooks_router
+    from app.api.v1.events import router as events_router
     app.include_router(health_router)
     app.include_router(webhooks_router)
+    app.include_router(events_router)
 
     return app
 
