@@ -66,37 +66,38 @@ Webhooks in production are unreliable by nature. Providers send duplicates. Your
 ```
 webhook-relay/
 ├── app/
-│   ├── main.py                    # FastAPI app factory & middleware
+│   ├── main.py                    # FastAPI app factory & lifespan handler
 │   ├── config.py                  # Settings via pydantic-settings
 │   ├── api/
-│   │   ├── deps.py                # Dependency injection (DB session, etc.)
+│   │   ├── deps.py                # Dependency injection (DB session)
 │   │   └── v1/
-│   │       ├── webhooks.py        # POST /webhooks/{provider}
-│   │       ├── events.py          # GET  /events, event detail, manual retry
-│   │       └── health.py          # Liveness & readiness probes
+│   │       ├── webhooks.py        # POST /api/v1/webhooks/{provider}
+│   │       ├── events.py          # GET /events, event detail, manual retry
+│   │       └── health.py          # GET /health
 │   ├── core/
 │   │   ├── security.py            # HMAC signature verification
-│   │   └── idempotency.py         # Idempotency key check & storage
+│   │   └── idempotency.py         # Idempotency key deduplication
 │   ├── providers/                 # Strategy pattern — one module per provider
 │   │   ├── base.py                # Abstract base: WebhookProvider
-│   │   ├── github.py              # GitHub-specific implementation
-│   │   └── stripe.py              # Stripe-specific implementation
+│   │   ├── github.py              # GitHub implementation
+│   │   └── registry.py            # Provider name → instance map
 │   ├── models/
 │   │   ├── event.py               # WebhookEvent (immutable log)
 │   │   └── delivery.py            # DeliveryAttempt (dispatch tracking)
-│   ├── schemas/                   # Pydantic request/response schemas
+│   ├── schemas/
+│   │   ├── webhook.py             # Ingestion response schema
+│   │   └── event.py               # Event list, detail, delivery schemas
 │   ├── db/
 │   │   ├── session.py             # Async engine & session factory
 │   │   └── migrations/            # Alembic migration versions
 │   └── workers/
 │       ├── celery_app.py          # Celery instance & config
 │       ├── tasks.py               # dispatch_event (retry with backoff)
-│       └── dead_letter.py         # DLQ persistence & manual retry
+│       └── dead_letter.py         # DLQ persistence
 ├── tests/
-│   ├── conftest.py                # Fixtures: test DB, async client, mock broker
+│   ├── conftest.py                # Fixtures: test DB, async client
 │   ├── test_ingestion.py          # Signature, idempotency, persistence
-│   ├── test_providers.py          # Per-provider strategy verification
-│   ├── test_dispatch.py           # Retry logic, backoff, DLQ routing
+│   ├── test_providers.py          # Provider strategy verification
 │   └── test_events_api.py         # Event log queries & filtering
 ├── docker-compose.yml
 ├── Dockerfile
@@ -113,13 +114,12 @@ webhook-relay/
 
 - Docker & Docker Compose
 - Python 3.11+
-- Make (optional, for shortcuts)
 
 ### Run with Docker Compose
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-username/webhook-relay.git
+git clone https://github.com/eduardorocha-dev/webhook-relay.git
 cd webhook-relay
 
 # Copy env template and fill in secrets
@@ -131,23 +131,25 @@ docker compose up --build
 
 The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
 
+### Run Database Migrations
+
+```bash
+docker compose exec app alembic upgrade head
+```
+
 ### Run Locally (without Docker)
 
 ```bash
-# Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate
 
-# Install dependencies
 pip install -e ".[dev]"
 
-# Run database migrations
 alembic upgrade head
 
-# Start the API server
 uvicorn app.main:app --reload
 
-# In a separate terminal, start the Celery worker
+# In a separate terminal
 celery -A app.workers.celery_app worker --loglevel=info
 ```
 
@@ -158,10 +160,10 @@ celery -A app.workers.celery_app worker --loglevel=info
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/v1/webhooks/{provider}` | Ingest a webhook event |
-| `GET` | `/api/v1/events` | Query event log (filter by provider, type, date range) |
+| `GET` | `/api/v1/events` | Query event log (filter by provider, event_type) |
 | `GET` | `/api/v1/events/{event_id}` | Event detail with delivery history |
 | `POST` | `/api/v1/events/{event_id}/retry` | Re-dispatch a dead-lettered event |
-| `GET` | `/health` | Liveness & readiness check |
+| `GET` | `/health` | Liveness check |
 
 ### Example: Sending a Test Webhook
 
@@ -171,7 +173,7 @@ curl -X POST http://localhost:8000/api/v1/webhooks/github \
   -H "X-Hub-Signature-256: sha256=<computed-signature>" \
   -H "X-GitHub-Event: push" \
   -H "X-GitHub-Delivery: <unique-delivery-id>" \
-  -d '{"ref": "refs/heads/main", "commits": [...]}'
+  -d '{"ref": "refs/heads/main", "commits": []}'
 ```
 
 ### Example: Querying the Event Log
@@ -196,8 +198,9 @@ Environment variables (see `.env.example`):
 | `REDIS_URL` | Redis connection string (Celery broker) | — |
 | `GITHUB_WEBHOOK_SECRET` | Secret for GitHub signature verification | — |
 | `STRIPE_WEBHOOK_SECRET` | Secret for Stripe signature verification | — |
+| `TARGET_URL` | Downstream service URL to deliver events to | — |
 | `MAX_RETRY_ATTEMPTS` | Retries before routing to DLQ | `5` |
-| `RETRY_BASE_DELAY_SECONDS` | Initial backoff delay | `10` |
+| `RETRY_BASE_DELAY_SECONDS` | Initial backoff delay in seconds | `10` |
 
 ---
 
@@ -205,7 +208,7 @@ Environment variables (see `.env.example`):
 
 ### Strategy Pattern for Providers
 
-Each provider implements a common `WebhookProvider` interface with three methods: `verify_signature`, `extract_event_type`, and `extract_idempotency_key`. The ingestion endpoint is entirely provider-agnostic — adding support for a new provider means creating one file in `app/providers/` and registering it in the provider map. No existing code changes.
+Each provider implements a common `WebhookProvider` interface with three methods: `verify_signature`, `extract_event_type`, and `extract_idempotency_key`. The ingestion endpoint is entirely provider-agnostic — adding support for a new provider means creating one file in `app/providers/` and registering it in the registry. No existing code changes.
 
 ### Two-Model Data Design
 
@@ -221,20 +224,16 @@ Celery tasks retry with exponential backoff (10s → 20s → 40s → 80s → 160
 
 ```bash
 # Run all tests
-pytest
+docker compose exec app python -m pytest tests/ -v
 
 # With coverage
-pytest --cov=app --cov-report=term-missing
+docker compose exec app python -m pytest tests/ --cov=app --cov-report=term-missing
 
 # Run a specific test file
-pytest tests/test_ingestion.py -v
+docker compose exec app python -m pytest tests/test_ingestion.py -v
 ```
 
----
-
-## Related Projects
-
-- [**fintrack-api**](https://github.com/your-username/fintrack-api) — A financial tracking REST API demonstrating CRUD operations, JWT authentication, scheduled jobs, and domain modeling. Together with webhook-relay, these two projects cover complementary backend concerns: traditional REST API design vs. event-driven architecture.
+Tests run against a dedicated PostgreSQL database (`webhookdb_test`) to match the production environment.
 
 ---
 
